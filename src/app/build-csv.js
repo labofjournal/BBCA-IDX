@@ -41,7 +41,7 @@ function exportCSV() {
 
   /* ---------- Metadata ---------- */
   L.push(csvRow([ 'BCA IDX — SALES CONSOLE' ]));
-  L.push(csvRow([ 'Laporan', (typeof state !== 'undefined' && (state.mode === 'live' || state.mode === 'live-cache')) ? 'Data pasar live (terkalibrasi model penjualan)' : 'Data simulasi penjualan' ]));
+  L.push(csvRow([ 'Laporan', 'Data simulasi penjualan' ]));
   L.push(csvRow([ 'Diekspor', now.toLocaleString('id-ID') ]));
   L.push(csvRow([ 'Periode', `${state.days} hari terakhir` ]));
   L.push(CSV_BLANK);

@@ -1,76 +1,52 @@
-# BCA IDX — Sales Dashboard (MODE LIVE / Online)
+# BCA IDX — Live Market Console
 
-Dashboard penjualan bergaya *sales console* untuk BCA IDX — kini **terhubung
-online**: angka pasar diambil **real-time dari API publik** begitu halaman
-dibuka, tanpa konfigurasi apa pun.
+Dashboard pasar bergaya *sales console* untuk BCA IDX (BBCA.JK + saham-saham
+bank besar IDX). Antarmuka murni HTML/CSS/JS tanpa framework, sementara angka
+dijemput **langsung dari API pasar** lewat proxy server ini — lengkap dengan
+splash **"Loading Data..."** berlogo saat web dibuka.
 
-> **URL:**  🔗 <https://labofjournal.github.io/BCA-IDX-Dashboard/>
+> **URL:**  🔗 <https://bca-idx.space-z.ai/>
 
 ---
 
-## Mode Online (baru)
+## Tentang Proyek
 
-`src/app/main.js` kini memiliki lapisan data live. Saat halaman dibuka:
-
-1. **Kraken Public API** — riwayat harian 120 hari + tick 24 jam untuk
-   BTC/USD dan PAXG/USD (emas token) → membentuk seri pendapatan harian,
-   chip delta, dan sebagian besar pergerakan KPI.
-2. **ExchangeRate-API (open)** — kurs USD/IDR nyata + kurs silang
-   EUR, SGD, JPY → men-drive nilai Rupiah pada ticker & konversi harga.
-3. **Gold-API** — harga spot emas dunia XAU/USD → item **EMAS** di ticker.
-
-Rantai cadangan otomatis bila satu sumber gagal:
-**Kraken → Binance (data-api.binance.vision) → CoinGecko → simulasi offline**.
-Status koneksi tampil sebagai badge di header:
-`LIVE` (hijau berdenyut) · `LIVE · cache` · `Simulasi offline`.
-
-### Cara kerja pemetaan data
-
-- **Grafik Pendapatan Harian** — kanal *Online* mengikuti pergerakan harian
-  nyata BTC; kanal *Toko* mengikuti PAXG (emas). Bentuk naik/turunnya 100%
-  data pasar; levelnya diskalakan ke volume model penjualan
-  (`SCALE_ONLINE` / `SCALE_STORE` di `main.js`).
-- **Ticker** — USD/IDR, EUR/IDR, SGD/IDR, JPY/IDR, EMAS (XAU), BTC, ETH,
-  PAXG, dan indeks komposit BCA-IDX: seluruhnya angka pasar nyata.
-- **KPI, hero, produk, wilayah** — dihitung dari seri nyata yang sama;
-  distribusi antar item memakai bobot stabil per periode (model).
-- **Pembaruan otomatis** — tick harga tiap 60 detik, riwayat harian tiap
-  10 menit, dijeda saat tab tidak aktif, cache `localStorage` tahan putus.
-
-## API Key (opsional)
-
-Dashboard **tetap LIVE tanpa key** — semua endpoint di atas publik & gratis.
-Bila Anda memiliki key pribadi, cukup isi di bagian atas `src/app/main.js`:
-
-```js
-const LIVE_API = {
-    erapiKey: '',      // ← key exchangerate-api.com (opsional)
-    coingeckoKey: '',  // ← key CoinGecko demo/pro (opsional)
-    ...
-};
-```
-
-Pola URL ber-key sudah disiapkan otomatis:
-`https://v6.exchangerate-api.com/v6/<KEY>/latest/USD` dan header
-`x-cg-demo-api-key` untuk CoinGecko.
+BCA IDX Live Market Console menampilkan aktivitas transaksi harian BBCA yang
+dipisah per **Sesi I (09.00–12.00 WIB)** dan **Sesi II (13.30–16.00 WIB)** bursa
+IDX. Nilai transaksi harian = estimasi **harga × volume**. Seluruh data dijemput
+dari **Yahoo Finance (v8 chart API, publik & tanpa API key)** melalui endpoint
+proxy `/api/market` (Next.js route handler) yang mengagregasi data intrahari per
+hari bursa. Bila API tidak terjangkau, dashboard jatuh ke **MODE SIMULASI**
+(PRNG `mulberry32`) yang dilabeli jujur pada lencana status — tampilan tetap
+hidup tanpa mengelabui pengguna.
 
 ## Fitur Utama
 
-- **Pendapatan Harian** — grafik SVG buatan sendiri (tanpa library) dengan
-  dua seri (Online / Toko Fisik) plus garis rata-rata, tooltip *hover*, dan
-  animasi angka *hero* (pendapatan hari ini, pesanan, transaksi sesi,
+- **Splash "Loading Data..."** — layar pemuat berlogo `icon_web.svg` muncul
+  seketika saat web dibuka dan memudar begitu data pertama siap.
+- **Nilai Transaksi Harian — BBCA** — grafik SVG buatan sendiri (tanpa
+  library) dengan dua seri (Sesi I / Sesi II) plus garis rata-rata, tooltip
+  *hover*, dan animasi angka *hero* (harga terkini, volume, update kutipan,
   puncak harian).
-- **Periode 7H / 30H / 90H** — sakelar periode (riwayat nyata diambil
-  sekali, dipotong lokal — tanpa permintaan ulang).
-- **Ringkasan Periode** — KPI pendapatan, total pesanan, AOV, tingkat
-  konversi, lengkap dengan *sparkline* dan chip perubahan naik/turun.
-- **Produk Terlaris & Wilayah** — dialokasikan dari total pendapatan
-  periode yang nyata.
-- **Transaksi Langsung** — *feed* transaksi yang mengalir real-time,
-  dapat dijeda/lanjut; nilai transaksi merespons pergerakan pasar 24 jam.
-- **Ekspor CSV / XLSX** — CSV (pemisah `;`, UTF-8 + BOM, CRLF — aman Excel
-  locale Indonesia) dan XLSX asli 5 sheet dengan chart native Excel.
-- **Jam & ticker** — jam real-time dan *ticker* pasar berjalan.
+- **Periode 7H / 30H / 90H** — sakelar periode hari bursa; permintaan yang
+  datang saat masih memuat otomatis diantrekan.
+- **Ringkasan Periode** — KPI nilai transaksi, total volume, harga penutupan,
+  dan porsi Sesi I, lengkap dengan *sparkline* serta chip perubahan
+  naik/turun vs periode sebelumnya.
+- **Saham Bank Teraktif** — peringkat BBCA, BBRI, BMRI, BBNI, ARTO, BRIS,
+  BBTN berdasar nilai transaksi periode terpilih.
+- **Komposisi Sesi** — distribusi Sesi I vs Sesi II beserta perubahan poin
+  persentase.
+- **Kutipan Langsung** — *feed* kutipan BBCA yang diperbarui tiap 8 detik,
+  dapat dijeda/lanjut lewat tombol pause.
+- **Ekspor CSV / XLSX** — tombol *Download (CSV/XLSX)*:
+  - **CSV** — pemisah `;`, UTF-8 + BOM, CRLF, angka uang murni — aman
+    langsung dibuka di Excel locale Indonesia.
+  - **XLSX** — workbook `.xlsx` asli berisi 5 sheet terpisah (lengkap dengan
+    CRC32, ZIP STORE, dan XML worksheet yang dibangun manual di JavaScript,
+    termasuk chart native Excel).
+- **Jam & ticker** — jam real-time di header, *ticker* berjalan di bawahnya,
+  dan lencana status sumber data (LIVE / SIMULASI / MEMUAT).
 
 ## Tumpukan Teknologi
 
@@ -80,45 +56,51 @@ Pola URL ber-key sudah disiapkan otomatis:
 | Gaya     | CSS murni (`src/styles.css`), font Google Fonts  |
 | Logika   | JavaScript vanilla (ES2020), tanpa framework     |
 | Grafik   | SVG yang dirender manual lewat DOM               |
-| Data     | Fetch API → Kraken, ExchangeRate-API, Gold-API (fallback: Binance, CoinGecko) |
+| Data     | Yahoo Finance v8 chart API via `/api/market` (Next.js route handler, tanpa API key) |
 | Ekspor   | Blob + data URI (CSV) dan ZIP/XML buatan sendiri (XLSX) |
 
 ## Menjalankan
 
-Tidak ada proses *build*. Cukup salah satu dari:
+- **Online** — buka <https://bca-idx.space-z.ai/> (mode LIVE penuh).
+- **Lokal dengan data live (disarankan)** — dari folder proyek:
 
-```bash
-# Opsi 1 — buka langsung
-buka index.html di peramban (klik dua kali file-nya)
+  ```bash
+  npm run dev
+  # lalu akses http://localhost:3000
+  ```
 
-# Opsi 2 — lewat server statis (disarankan)
-python3 -m http.server 8000
-# lalu akses http://localhost:8000
-```
-
-> Menjalankan lewat `file://` tetap berfungsi — semua API di atas mengizinkan
-> CORS dari origin apa pun. Bila jaringan memblokir keluar (outbound), badge
-> otomatis berubah menjadi **Simulasi offline**.
+  Server Next.js menyediakan endpoint `/api/market` sebagai proxy data.
+- **Lokal tanpa server** — klik dua kali `index.html` (atau
+  `python3 -m http.server 8000`). Dashboard tetap tampil, namun karena
+  endpoint API tidak ada, beralih otomatis ke MODE SIMULASI.
 
 ## Struktur Proyek
 
 ```
-BCA-IDX-Dashboard-main/
-├── index.html          # Halaman utama dashboard
-├── README.md           # Dokumen ini
+/ (root proyek)
+├── index.html               # Halaman utama dashboard (root) — mirror public/index.html
+├── README.md                # Dokumen ini
 ├── logo/
-│   └── icon_web.svg    # Logo & favicon
-└── src/
-    ├── styles.css      # Seluruh gaya tampilan (+ badge LIVE)
-    └── app/
-        ├── main.js         # State, lapisan API live, render chart & UI
-        ├── build-csv.js    # Modul ekspor CSV (Excel-ID friendly)
-        └── build-excel.js  # Modul ekspor XLSX (ZIP + XML manual)
+│   └── icon_web.svg         # Logo & favicon (dipakai splash + header)
+├── src/
+│   ├── styles.css           # Seluruh gaya tampilan dashboard
+│   └── app/
+│       ├── main.js          # State, fetch API live, render chart & UI
+│       ├── build-csv.js     # Modul ekspor CSV (Excel-ID friendly)
+│       └── build-excel.js   # Modul ekspor XLSX (ZIP + XML manual)
+├── public/                  # Web root yang disajikan server (mirror dari di atas)
+│   ├── index.html
+│   ├── logo/icon_web.svg
+│   └── src/…
+├── src/app/api/market/route.ts   # Endpoint /api/market — proxy Yahoo Finance
+└── bca-idx-extract/         # Arsip proyek awal (sebelum di-online-kan)
 ```
 
 ## Catatan
 
-- Pergerakan persentase, kurs, harga emas, dan harga kripto adalah **data
-  pasar nyata** dari API di atas; level Rupiah pada panel penjualan adalah
-  hasil penskalaan ke model toko — bukan laporan keuangan yang sebenarnya.
+- Nilai transaksi harian = **estimasi harga × volume** (konvensi pasar yang
+  umum) — bukan laporan keuangan resmi BCA maupun IDX.
+- Saat API offline, dashboard beralih ke MODE SIMULASI dan menandainya
+  jelas pada lencana status; tidak ada data pribadi yang dikumpulkan.
 - Ekspor mengikuti nama file otomatis berformat `dd-mm-yy_hh-mm-ss`.
+- Seluruh render dan pembuatan file ekspor terjadi lokal di peramban Anda.

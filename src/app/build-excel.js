@@ -357,7 +357,7 @@ function exportXLSX() {
   const regRevs = state.regions.map(r => r.rev);
 
   const dashboardRows = [
-    [ (typeof state !== 'undefined' && (state.mode === 'live' || state.mode === 'live-cache')) ? 'BCA IDX — Sales Console (Data Pasar Live)' : 'BCA IDX — Sales Console (Data Simulasi)' ],
+    [ 'BCA IDX — Sales Console (Data Simulasi)' ],
     [ 'Diekspor', new Date().toLocaleString('id-ID') ],
     [ 'Periode', `${state.days} hari terakhir` ],
     [],

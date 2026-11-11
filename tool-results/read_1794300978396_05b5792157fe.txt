@@ -1,0 +1,655 @@
+     1→/* ================================================================
+     2→   main.js — BCA IDX LIVE MARKET CONSOLE
+     3→   ----------------------------------------------------------------
+     4→   DIJADIKAN ONLINE: seluruh angka pada dashboard kini dijemput
+     5→   LANGSUNG dari API pasar (sebelumnya: simulasi PRNG di browser).
+     6→
+     7→   LINK API — DITERAPKAN LANGSUNG & OTOMATIS (blok CONFIG di bawah):
+     8→     · Endpoint internal : /api/market            (proxy server ini)
+     9→     · Sumber langsung   : https://query1.finance.yahoo.com/v8/finance/chart/BBCA.JK?range=1y&interval=1h
+    10→     · Fallback otomatis : https://query2.finance.yahoo.com/v8/finance/chart/BBCA.JK
+    11→     · Tanpa API key     — publik & otomatis. SLOT API.KEY di bawah
+    12→       tetap disediakan: bila Anda memakai provider berbayar,
+    13→       isi key-nya di situ dan otomatis dipakai setiap request.
+    14→
+    15→   Aliran data:
+    16→     Yahoo Finance → /api/market (agregasi sesi I & II bursa IDX)
+    17→     → main.js (fetch) → chart, KPI, hero, saham teraktif,
+    18→       komposisi sesi, ticker, feed kutipan, ekspor CSV/XLSX.
+    19→
+    20→   Jika API tidak terjangkau, dashboard jatuh ke MODE SIMULASI
+    21→   (lencana merah) agar tampilan tetap hidup — jujur dilabeli.
+    22→   ================================================================ */
+    23→
+    24→/* ============ CONFIG — LINK API (langsung & otomatis) ============ */
+    25→const API = {
+    26→    URL: '/api/market',                    // ← endpoint data live (server ini)
+    27→    SOURCE_URL: 'https://query1.finance.yahoo.com/v8/finance/chart/BBCA.JK?range=1y&interval=1h',
+    28→    SYMBOL: 'BBCA.JK',                     // PT Bank Central Asia Tbk (IDX)
+    29→    KEY: '',                               // ← SLOT API KEY (opsional; kosong = otomatis tanpa key)
+    30→    REFRESH_MS: 60000,                     // penyegaran data penuh
+    31→    QUOTE_MS: 8000,                        // polling kutipan langsung
+    32→    TIMEOUT_MS: 15000
+    33→};
+    34→
+    35→const $ = s => document.querySelector(s);
+    36→const NF = new Intl.NumberFormat('id-ID');
+    37→const state = {
+    38→    days: 7,
+    39→    show: { online: true, store: true },   // online → Sesi I, store → Sesi II
+    40→    paused: false,
+    41→    mode: 'loading',                       // 'live' | 'sim' | 'loading'
+    42→    loading: false,
+    43→    data: [],                              // [{date, dstr, s1, s2, total, close, vol}]
+    44→    prev: null,                            // ringkasan periode sebelumnya (riil)
+    45→    peers: [],                             // saham bank teraktif (riil)
+    46→    sessions: [],                          // komposisi sesi (riil)
+    47→    quote: null,                           // kutipan BBCA terakhir (riil)
+    48→    index: null,                           // IHSG (riil)
+    49→    source: null,
+    50→    asOf: null,
+    51→    marketOpen: false,
+    52→    todayValue: 0,
+    53→    todayVol: 0,
+    54→    sessionTx: 0,                          // penghitung update kutipan sesi
+    55→    txLog: [],                             // log kutipan sesi — ikut diekspor
+    56→    lastFeed: { price: null, vol: null }
+    57→};
+    58→
+    59→/* ============ util dasar ============ */
+    60→function fmtIDR(v) {
+    61→    if (v >= 1e12) return 'Rp ' + (v / 1e12).toLocaleString('id-ID', { maximumFractionDigits: 2 }) + ' T';
+    62→    if (v >= 1e9) return 'Rp ' + (v / 1e9).toLocaleString('id-ID', { maximumFractionDigits: v < 1e10 ? 1 : 0 }) + ' M';
+    63→    if (v >= 1e6) return 'Rp ' + (v / 1e6).toLocaleString('id-ID', { maximumFractionDigits: v < 1e7 ? 1 : 0 }) + ' jt';
+    64→    if (v >= 1e3) return 'Rp ' + Math.round(v / 1e3) + ' rb';
+    65→    return 'Rp ' + NF.format(Math.round(v));
+    66→}
+    67→const fmtPrice = v => 'Rp ' + NF.format(Math.round(v));
+    68→const fmtInt = v => NF.format(Math.round(v));
+    69→function fmtVol(v) {
+    70→    if (v >= 1e9) return (v / 1e9).toLocaleString('id-ID', { maximumFractionDigits: 2 }) + ' M';
+    71→    if (v >= 1e6) return (v / 1e6).toLocaleString('id-ID', { maximumFractionDigits: 1 }) + ' jt';
+    72→    if (v >= 1e3) return (v / 1e3).toLocaleString('id-ID', { maximumFractionDigits: 0 }) + ' rb';
+    73→    return NF.format(Math.round(v));
+    74→}
+    75→const fmtPct = (v, dec = 1) => (v == null || !isFinite(v) ? '—' : v.toLocaleString('id-ID', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '%');
+    76→
+    77→/* angka yang "berjalan" naik/turun dengan easing */
+    78→function animateNumber(el, to, fmt, dur = 800) {
+    79→    if (!el) return;
+    80→    const from = Number(el.dataset.raw || 0);
+    81→    el.dataset.raw = to;
+    82→    const t0 = performance.now();
+    83→    (function frame(t) {
+    84→        const p = Math.min(1, (t - t0) / dur);
+    85→        const e = 1 - Math.pow(1 - p, 3);
+    86→        el.textContent = fmt(from + (to - from) * e);
+    87→        if (p < 1) requestAnimationFrame(frame);
+    88→    })(t0);
+    89→}
+    90→
+    91→const arrow = up => `<svg width="9" height="9" viewBox="0 0 10 10"><path d="M5 1.5 9 8H1z" fill="currentColor" transform="${up ? '' : 'rotate(180 5 5)'}"/></svg>`;
+    92→
+    93→function setChip(el, pct, label) {
+    94→    if (!el) return;
+    95→    if (pct == null || !isFinite(pct)) {
+    96→        el.innerHTML = `<span class="chip-note">${label || ''}</span>`;
+    97→        return;
+    98→    }
+    99→    const up = pct >= 0;
+   100→    el.innerHTML = `<span class="dchip ${up ? 'up' : 'down'}">${arrow(up)} ${Math.abs(pct).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</span><span class="chip-note">${label}</span>`;
+   101→}
+   102→
+   103→function toast(msg) {
+   104→    const t = document.createElement('div');
+   105→    t.className = 'toast';
+   106→    t.textContent = msg;
+   107→    $('#toasts').appendChild(t);
+   108→    setTimeout(() => t.classList.add('out'), 2400);
+   109→    setTimeout(() => t.remove(), 2850);
+   110→}
+   111→
+   112→function niceCeil(v) {
+   113→    if (!(v > 0)) return 1;
+   114→    const p = Math.pow(10, Math.floor(Math.log10(v)));
+   115→    const f = v / p;
+   116→    const m = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 3 ? 3 : f <= 4 ? 4 : f <= 5 ? 5 : f <= 6 ? 6 : f <= 8 ? 8 : 10;
+   117→    return m * p;
+   118→}
+   119→
+   120→function sample(arr, m) {
+   121→    if (!arr.length) return arr;
+   122→    if (arr.length <= m) return arr;
+   123→    const step = arr.length / m, out = [];
+   124→    for (let i = 0; i < m; i++) out.push(arr[Math.floor(i * step)]);
+   125→    return out;
+   126→}
+   127→
+   128→/* ============ lencana status sumber data ============ */
+   129→function setBadge(mode, asOf) {
+   130→    const b = $('#liveBadge');
+   131→    if (!b) return;
+   132→    if (mode === 'live') {
+   133→        b.className = 'live-badge live';
+   134→        b.innerHTML = `<i></i>LIVE · YAHOO FINANCE${asOf ? ' · ' + new Date(asOf).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB' : ''}`;
+   135→    } else if (mode === 'sim') {
+   136→        b.className = 'live-badge sim';
+   137→        b.innerHTML = `<i></i>SIMULASI · API OFFLINE`;
+   138→    } else {
+   139→        b.className = 'live-badge loading';
+   140→        b.innerHTML = `<i></i>MEMUAT DATA PASAR…`;
+   141→    }
+   142→}
+   143→
+   144→/* ============ chart SVG ============ */
+   145→function renderChart() {
+   146→    const wrap = $('#chartWrap'), svg = $('#chartSvg');
+   147→    if (!wrap || !svg || !state.data.length) return;
+   148→    const W = wrap.clientWidth, H = 330;
+   149→    svg.setAttribute('width', W);
+   150→    svg.setAttribute('height', H);
+   151→    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+   152→
+   153→    const padL = 56, padR = 14, padT = 16, padB = 28;
+   154→    const innerW = W - padL - padR, innerH = H - padT - padB;
+   155→    const d = state.data, n = d.length;
+   156→
+   157→    const vis = d.map(x => ({
+   158→        online: state.show.online ? x.s1 : 0,
+   159→        store: state.show.store ? x.s2 : 0
+   160→    }));
+   161→    vis.forEach(v => v.total = v.online + v.store);
+   162→
+   163→    const yMax = niceCeil(Math.max(...vis.map(v => v.total), 1));
+   164→    const slot = innerW / n, barW = Math.min(slot * 0.6, 36);
+   165→    const y = v => padT + innerH * (1 - v / yMax);
+   166→    state.geo = { padL, slot, padT, innerH, yMax, W };
+   167→
+   168→    let s = '';
+   169→    for (let k = 0; k <= 4; k++) {
+   170→        const vy = padT + innerH * (1 - k / 4);
+   171→        s += `<line class="gridline" x1="${padL}" y1="${vy}" x2="${W - padR}" y2="${vy}"/>`;
+   172→        s += `<text class="ax" x="${padL - 10}" y="${vy + 3.5}" text-anchor="end">${k ? fmtIDR(yMax * k / 4) : '0'}</text>`;
+   173→    }
+   174→    const step = Math.max(1, Math.ceil(n / 7));
+   175→    for (let i = 0; i < n; i++) {
+   176→        if (i % step === 0 || i === n - 1) {
+   177→            const lbl = d[i].date.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+   178→            s += `<text class="ax" x="${padL + i * slot + slot / 2}" y="${H - 8}" text-anchor="middle">${lbl}</text>`;
+   179→        }
+   180→    }
+   181→    for (let i = 0; i < n; i++) {
+   182→        const x = padL + i * slot + (slot - barW) / 2, v = vis[i];
+   183→        let g = '';
+   184→        if (v.online > 0) {
+   185→            const h = v.online / yMax * innerH;
+   186→            g += `<rect class="b-on" x="${x.toFixed(1)}" y="${(padT + innerH - h).toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="${Math.min(3, h / 2).toFixed(1)}"/>`;
+   187→        }
+   188→        if (v.store > 0) {
+   189→            const h = v.store / yMax * innerH;
+   190→            const yTop = padT + innerH - (state.show.online ? v.online / yMax * innerH : 0) - h;
+   191→            g += `<rect class="b-st" x="${x.toFixed(1)}" y="${yTop.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="${Math.min(3, h / 2).toFixed(1)}"/>`;
+   192→        }
+   193→        s += `<g class="bar-g" style="animation-delay:${Math.round(i * 480 / n)}ms">${g}</g>`;
+   194→    }
+   195→    if (n >= 4) {
+   196→        const win = Math.min(7, Math.max(3, Math.round(n / 5)));
+   197→        const pts = vis.map((_, i) => {
+   198→            const a = vis.slice(Math.max(0, i - win + 1), i + 1);
+   199→            const m = a.reduce((s2, v) => s2 + v.total, 0) / a.length;
+   200→            return (padL + i * slot + slot / 2).toFixed(1) + ' ' + y(m).toFixed(1);
+   201→        });
+   202→        s += `<path class="ma-line" d="M${pts.join(' L ')}"/>`;
+   203→    }
+   204→    s += `<line class="xhair" x1="0" y1="${padT}" x2="0" y2="${padT + innerH}"/>`;
+   205→    for (let i = 0; i < n; i++) {
+   206→        s += `<rect class="hit" data-i="${i}" x="${(padL + i * slot).toFixed(1)}" y="${padT}" width="${slot.toFixed(1)}" height="${innerH}" fill="transparent"/>`;
+   207→    }
+   208→    svg.innerHTML = s;
+   209→
+   210→    svg.querySelectorAll('.hit').forEach(r => {
+   211→        r.addEventListener('mouseenter', () => showTip(+r.dataset.i));
+   212→        r.addEventListener('mouseleave', hideTip);
+   213→    });
+   214→}
+   215→
+   216→function showTip(i) {
+   217→    const { padL, slot, padT, innerH, yMax, W } = state.geo;
+   218→    const d = state.data[i], tip = $('#chartTip'), svg = $('#chartSvg');
+   219→    tip.innerHTML =
+   220→        `<div class="tt-date">${d.date.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long' })}</div>` +
+   221→        `<div class="tt-row"><i class="sw on"></i>Sesi I<b>${fmtIDR(d.s1)}</b></div>` +
+   222→        `<div class="tt-row"><i class="sw st"></i>Sesi II<b>${fmtIDR(d.s2)}</b></div>` +
+   223→        `<div class="tt-row"><i class="sw px" style="background:#a56d25"></i>Penutupan<b>${fmtPrice(d.close)}</b></div>` +
+   224→        `<div class="tt-total">Total · ${fmtIDR(d.total)}</div>`;
+   225→    const cx = padL + i * slot + slot / 2;
+   226→    const top = padT + innerH * (1 - d.total / yMax);
+   227→    tip.style.left = Math.max(95, Math.min(W - 95, cx)) + 'px';
+   228→    if (top < 120) {
+   229→        tip.style.top = (top + 14) + 'px';
+   230→        tip.classList.add('below');
+   231→    } else {
+   232→        tip.style.top = (top - 8) + 'px';
+   233→        tip.classList.remove('below');
+   234→    }
+   235→    tip.classList.add('show');
+   236→    const xh = svg.querySelector('.xhair');
+   237→    xh.setAttribute('x1', cx);
+   238→    xh.setAttribute('x2', cx);
+   239→    xh.style.opacity = 1;
+   240→    svg.querySelectorAll('.bar-g').forEach((g, j) => g.style.opacity = j === i ? 1 : 0.35);
+   241→}
+   242→
+   243→function hideTip() {
+   244→    $('#chartTip').classList.remove('show');
+   245→    const svg = $('#chartSvg');
+   246→    svg.querySelector('.xhair').style.opacity = 0;
+   247→    svg.querySelectorAll('.bar-g').forEach(g => g.style.opacity = '');
+   248→}
+   249→
+   250→/* ============ KPI & sparkline ============ */
+   251→function sparkline(el, arr, color) {
+   252→    if (!el || !arr.length) return;
+   253→    const w = 90, h = 30, min = Math.min(...arr), max = Math.max(...arr), r = (max - min) || 1;
+   254→    const pts = arr.map((v, i) =>
+   255→        `${(arr.length > 1 ? i / (arr.length - 1) : 1) * w},${(h - 3 - (v - min) / r * (h - 6)).toFixed(1)}`).join(' ');
+   256→    el.innerHTML = `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+   257→}
+   258→
+   259→state.kpi = {};
+   260→
+   261→function updateKPIs() {
+   262→    const d = state.data;
+   263→    if (!d.length) return;
+   264→    const rev = d.reduce((a, x) => a + x.total, 0);
+   265→    const vol = d.reduce((a, x) => a + x.vol, 0);
+   266→    const closeLast = d[d.length - 1].close;
+   267→    const s1 = d.reduce((a, x) => a + x.s1, 0);
+   268→    const s1Share = rev > 0 ? s1 / rev * 100 : 0;
+   269→    const p = state.prev;
+   270→    const dRev = p && p.total > 0 ? (rev - p.total) / p.total * 100 : null;
+   271→    const dOrd = p && p.vol > 0 ? (vol - p.vol) / p.vol * 100 : null;
+   272→    const dAov = p && p.closeLast > 0 ? (closeLast - p.closeLast) / p.closeLast * 100 : null;
+   273→    const pShare = p && p.total > 0 ? p.s1 / p.total * 100 : null;
+   274→    const dCnv = pShare != null ? s1Share - pShare : null;
+   275→
+   276→    state.kpi = { rev: Math.round(rev), orders: Math.round(vol), aov: Math.round(closeLast), conv: +s1Share.toFixed(1), dRev, dOrd, dAov, dCnv };
+   277→
+   278→    animateNumber($('#kRev'), rev, fmtIDR, 1000);
+   279→    animateNumber($('#kOrd'), vol, fmtInt, 1000);
+   280→    animateNumber($('#kAov'), closeLast, fmtPrice, 1000);
+   281→    animateNumber($('#kCnv'), s1Share, v => fmtPct(v), 1000);
+   282→
+   283→    setChip($('#dRev'), dRev, 'vs periode lalu');
+   284→    setChip($('#dOrd'), dOrd, 'vs periode lalu');
+   285→    setChip($('#dAov'), dAov, 'vs periode lalu');
+   286→    setChip($('#dCnv'), dCnv, 'poin vs periode lalu');
+   287→
+   288→    sparkline($('#spRev'), sample(d.map(x => x.total), 24), '#D14A1E');
+   289→    sparkline($('#spOrd'), sample(d.map(x => x.vol), 24), '#1C1712');
+   290→    sparkline($('#spAov'), sample(d.map(x => x.close), 24), '#1C1712');
+   291→    sparkline($('#spCnv'), sample(d.map(x => x.total > 0 ? x.s1 / x.total * 100 : 0), 24), '#1C1712');
+   292→}
+   293→
+   294→/* ============ hero (kutipan BBCA langsung) ============ */
+   295→function updateHero() {
+   296→    const d = state.data;
+   297→    if (!d.length || !state.quote) return;
+   298→    const q = state.quote;
+   299→    const last = d[d.length - 1];
+   300→
+   301→    state.todayValue = q.dayValue || last.total;
+   302→    state.todayVol = q.dayVolume || last.vol;
+   303→
+   304→    animateNumber($('#revToday'), q.price, fmtPrice, 900);
+   305→    setChip($('#heroDelta'), q.changePct, 'vs kemarin');
+   306→    $('#ordToday').textContent = fmtInt(state.todayVol);
+   307→    $('#sessTx').textContent = state.sessionTx;
+   308→
+   309→    const peak = d.reduce((a, x) => x.total > a.total ? x : a, d[0]);
+   310→    $('#peakDay').innerHTML = `${fmtIDR(peak.total)}<span class="peak-date">${peak.date.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' })}</span>`;
+   311→}
+   312→
+   313→/* ============ saham bank teraktif (ex-produk) ============ */
+   314→function renderPeers() {
+   315→    if (!state.peers.length) return;
+   316→    const max = state.peers[0].value || 1;
+   317→    $('#prodList').innerHTML = state.peers.map((p, i) => `
+   318→<div class="prod-row">
+   319→  <div class="prod-top">
+   320→    <span class="prod-name"><b class="rank">${String(i + 1).padStart(2, '0')}</b>${p.code} <span class="peer-name">${p.name}</span></span>
+   321→    <span class="mono prod-val">${fmtIDR(p.value)}</span>
+   322→  </div>
+   323→  <div class="prod-meta">
+   324→    <span>${fmtVol(p.vol)} lembar · Porsi ${p.share.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</span>
+   325→    <span class="dchip ${p.changePct >= 0 ? 'up' : 'down'}">${arrow(p.changePct >= 0)} ${Math.abs(p.changePct).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</span>
+   326→  </div>
+   327→  <div class="track"><i style="width:${(p.value / max * 100).toFixed(1)}%"></i></div>
+   328→</div>`).join('');
+   329→}
+   330→
+   331→/* ============ komposisi sesi (ex-wilayah) ============ */
+   332→function renderSessions() {
+   333→    const s1 = state.data.reduce((a, x) => a + x.s1, 0);
+   334→    const s2 = state.data.reduce((a, x) => a + x.s2, 0);
+   335→    const tot = s1 + s2;
+   336→    if (!tot) return;
+   337→    const p = state.prev;
+   338→    const pTot = p ? p.s1 + p.s2 : 0;
+   339→    const rows = [
+   340→        { name: 'Sesi I · 09.00–12.00', pct: s1 / tot * 100, rev: s1, delta: p && pTot > 0 ? s1 / tot * 100 - p.s1 / pTot * 100 : null },
+   341→        { name: 'Sesi II · 13.30–16.00', pct: s2 / tot * 100, rev: s2, delta: p && pTot > 0 ? s2 / tot * 100 - p.s2 / pTot * 100 : null }
+   342→    ];
+   343→    state.sessions = rows.map(r => ({ name: r.name, pct: r.pct, rev: Math.round(r.rev), delta: r.delta || 0 }));
+   344→    $('#regionList').innerHTML = rows.map(r => `
+   345→<div class="reg-row">
+   346→  <div class="reg-top">
+   347→    <span class="reg-name">${r.name}</span><i class="lead"></i>
+   348→    <span class="mono reg-pct">${r.pct.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</span>
+   349→  </div>
+   350→  <div class="reg-sub">
+   351→    <span>${fmtIDR(r.rev)}</span>
+   352→    ${r.delta == null ? `<span class="chip-note">periode awal</span>` : `<span class="dchip ${r.delta >= 0 ? 'up' : 'down'}">${arrow(r.delta >= 0)} ${Math.abs(r.delta).toLocaleString('id-ID', { maximumFractionDigits: 1 })} pp</span>`}
+   353→  </div>
+   354→</div>`).join('');
+   355→}
+   356→
+   357→/* ============ ticker (pergerakan riil) ============ */
+   358→function buildTicker() {
+   359→    let items = [];
+   360→    if (state.quote) {
+   361→        const q = state.quote, up = (q.changePct ?? 0) >= 0;
+   362→        items.push(`<span class="tk ${up ? 'up' : 'down'}">${arrow(up)} BBCA ${up ? '+' : '−'}${Math.abs(q.changePct ?? 0).toLocaleString('id-ID', { maximumFractionDigits: 2 })}% · ${fmtPrice(q.price)}</span>`);
+   363→        if (state.index) {
+   364→            const iUp = (state.index.dayChangePct ?? 0) >= 0;
+   365→            items.push(`<span class="tk ${iUp ? 'up' : 'down'}">${arrow(iUp)} IHSG ${iUp ? '+' : '−'}${Math.abs(state.index.dayChangePct ?? 0).toLocaleString('id-ID', { maximumFractionDigits: 2 })}%</span>`);
+   366→        }
+   367→        (state.peers || []).forEach(p => {
+   368→            if (p.code === 'BBCA') return;
+   369→            const u = (p.dayChangePct ?? 0) >= 0;
+   370→            items.push(`<span class="tk ${u ? 'up' : 'down'}">${arrow(u)} ${p.code} ${u ? '+' : '−'}${Math.abs(p.dayChangePct ?? 0).toLocaleString('id-ID', { maximumFractionDigits: 2 })}%</span>`);
+   371→        });
+   372→        items.push(`<span class="tk ${state.marketOpen ? 'up' : ''}">${state.marketOpen ? 'PASAR BUKA' : 'PASAR TUTUP'}</span>`);
+   373→        items.push(`<span class="tk">SUMBER: YAHOO FINANCE · SEGAR ${API.REFRESH_MS / 1000} D</span>`);
+   374→    } else {
+   375→        items = ['MENUNGGU DATA PASAR…', 'SUMBER: YAHOO FINANCE'];
+   376→    }
+   377→    const half = `<div class="tk-half">${items.join('')}</div>`;
+   378→    $('#tickerTrack').innerHTML = half + half;
+   379→}
+   380→
+   381→/* ============ feed kutipan langsung ============ */
+   382→const icoPause = '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="2" y="1.5" width="3" height="9" rx="1" fill="currentColor"/><rect x="7" y="1.5" width="3" height="9" rx="1" fill="currentColor"/></svg>';
+   383→const icoPlay = '<svg width="11" height="11" viewBox="0 0 12 12"><path d="M3 1.8v8.4c0 .8.9 1.3 1.6.9l6.6-4.2c.6-.4.6-1.4 0-1.8L4.6.9C3.9.5 3 1 3 1.8z" fill="currentColor"/></svg>';
+   384→
+   385→function feedRow(timeText, titleText, metaText, valText) {
+   386→    const li = document.createElement('div');
+   387→    li.className = 'feed-row new';
+   388→    li.innerHTML =
+   389→        `<span class="f-time mono">${timeText}</span>` +
+   390→        `<span class="f-main"><span class="f-name">${titleText}</span>` +
+   391→        `<span class="f-meta mono">${metaText}</span></span>` +
+   392→        `<span class="f-val mono">${valText}</span>`;
+   393→    const list = $('#feedList');
+   394→    list.prepend(li);
+   395→    while (list.children.length > 9) list.lastElementChild.remove();
+   396→}
+   397→
+   398→/* seed awal: bar intrahari riil dari API */
+   399→function seedFeed(bars) {
+   400→    const list = $('#feedList');
+   401→    if (list) list.innerHTML = '';
+   402→    (bars || []).slice(-9).reverse().forEach(b => {
+   403→        const t = new Date();
+   404→        state.txLog.push({ time: new Date().toISOString(), product: API.SYMBOL, city: 'IDX RG', channel: 'Bar intrahari', qty: Math.round(b.v), value: b.c });
+   405→        feedRow(b.t + ' WIB', `BBCA ${fmtPrice(b.c)}`, `vol ${fmtVol(b.v)} lembar`, fmtPrice(b.c));
+   406→    });
+   407→}
+   408→
+   409→/* satu kutipan dari polling API */
+   410→function pushQuoteRow(q) {
+   411→    const now = new Date();
+   412→    const time = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+   413→    const up = (q.changePct ?? 0) >= 0;
+   414→    const sesi = state.marketOpen ? (now.getHours() < 13 ? 'Sesi I' : 'Sesi II') : 'Pasar tutup';
+   415→    state.txLog.push({
+   416→        time: now.toISOString(),
+   417→        product: API.SYMBOL,
+   418→        city: 'IDX RG',
+   419→        channel: state.marketOpen ? 'Live' : 'Tutup',
+   420→        qty: Math.round(q.dayVolume || 0),
+   421→        value: q.price
+   422→    });
+   423→    feedRow(time, `BBCA <span class="dchip ${up ? 'up' : 'down'}">${arrow(up)} ${fmtPct(q.changePct, 2)}</span>`,
+   424→        `${sesi} · vol ${fmtVol(q.dayVolume || 0)} lembar · nilai ${fmtIDR(q.dayValue || 0)}`, fmtPrice(q.price));
+   425→}
+   426→
+   427→function pollQuote() {
+   428→    if (state.paused || state.mode === 'loading') return;
+   429→    fetchWithTimeout(`${API.URL}?quote=1${API.KEY ? '&apiKey=' + encodeURIComponent(API.KEY) : ''}`)
+   430→        .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+   431→        .then(p => {
+   432→            if (!p.ok || !p.quote) return;
+   433→            state.quote = { ...state.quote, ...p.quote };
+   434→            state.marketOpen = !!p.quote.marketOpen;
+   435→            state.asOf = p.asOf;
+   436→            if (state.lastFeed.price !== p.quote.price || state.lastFeed.vol !== p.quote.dayVolume) {
+   437→                state.lastFeed = { price: p.quote.price, vol: p.quote.dayVolume };
+   438→                pushQuoteRow(p.quote);
+   439→                state.sessionTx++;
+   440→            }
+   441→            updateHero();
+   442→            setBadge(state.mode, state.asOf);
+   443→        })
+   444→        .catch(() => { /* poll gagal → tunggu siklus berikutnya */ });
+   445→}
+   446→
+   447→function fetchWithTimeout(url, opts = {}) {
+   448→    const ctl = new AbortController();
+   449→    const t = setTimeout(() => ctl.abort(), API.TIMEOUT_MS);
+   450→    return fetch(url, { ...opts, signal: ctl.signal }).finally(() => clearTimeout(t));
+   451→}
+   452→
+   453→/* ============ pemuat data live (LINK API diterapkan di sini) ============ */
+   454→async function loadLive(days, opts = {}) {
+   455→    if (state.loading) return;
+   456→    state.loading = true;
+   457→    setBadge(state.mode === 'sim' ? 'sim' : 'loading');
+   458→    try {
+   459→        const url = `${API.URL}?days=${days}${API.KEY ? '&apiKey=' + encodeURIComponent(API.KEY) : ''}`;
+   460→        const res = await fetchWithTimeout(url);
+   461→        if (!res.ok) throw new Error('HTTP ' + res.status);
+   462→        const p = await res.json();
+   463→        if (!p.ok || !p.days || !p.days.length) throw new Error(p.detail || 'payload tidak valid');
+   464→
+   465→        state.mode = 'live';
+   466→        state.source = p.source;
+   467→        state.asOf = p.asOf;
+   468→        state.marketOpen = !!p.marketOpen;
+   469→        state.quote = { ...p.quote, longName: p.longName };
+   470→        state.index = p.index || null;
+   471→        state.prev = p.prev || null;
+   472→        state.data = p.days.map(x => ({
+   473→            date: new Date(x.d + 'T00:00:00+07:00'),
+   474→            dstr: x.d,
+   475→            s1: x.s1,
+   476→            s2: x.s2,
+   477→            total: x.total,
+   478→            close: x.close,
+   479→            vol: x.vol
+   480→        }));
+   481→        state.peers = p.peers || [];
+   482→
+   483→        buildTicker();
+   484→        updateKPIs();
+   485→        renderChart();
+   486→        updateHero();
+   487→        renderPeers();
+   488→        renderSessions();
+   489→        if (opts.seedFeed !== false) seedFeed(p.todayBars);
+   490→
+   491→        setBadge('live', state.asOf);
+   492→        if (opts.toast) toast(opts.toast);
+   493→        if (opts.first) toast('Data LIVE dari Yahoo Finance — ' + (p.longName || 'BBCA') + ' & saham bank');
+   494→    } catch (e) {
+   495→        if (!state.data.length) {
+   496→            startFallback();
+   497→        } else {
+   498→            toast('API gagal (' + (e.message || 'jaringan') + ') — memakai data terakhir');
+   499→            setBadge(state.mode, state.asOf);
+   500→        }
+   501→    } finally {
+   502→        state.loading = false;
+   503→    }
+   504→}
+   505→
+   506→/* ============ MODE SIMULASI (fallback bila API offline) ============ */
+   507→function mulberry32(a) {
+   508→    return function() {
+   509→        a |= 0;
+   510→        a = a + 0x6D2B79F5 | 0;
+   511→        let t = Math.imul(a ^ a >>> 15, 1 | a);
+   512→        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+   513→        return ((t ^ t >>> 14) >>> 0) / 4294967296
+   514→    }
+   515→}
+   516→
+   517→function startFallback() {
+   518→    state.mode = 'sim';
+   519→    const rng = mulberry32(Math.floor(Math.random() * 1e9));
+   520→    const n = state.days, now = Date.now(), out = [];
+   521→    for (let i = 0; i < n; i++) {
+   522→        const trend = 1 + 0.3 * i / Math.max(n - 1, 1);
+   523→        const s1 = 300e9 * trend * (0.8 + rng() * 0.4);
+   524→        const s2 = 180e9 * trend * (0.8 + rng() * 0.4);
+   525→        const close = 5200 + (rng() - 0.5) * 260;
+   526→        out.push({
+   527→            date: new Date(now - (n - 1 - i) * 864e5),
+   528→            dstr: new Date(now - (n - 1 - i) * 864e5).toISOString().slice(0, 10),
+   529→            s1, s2, total: s1 + s2, close, vol: Math.round((s1 + s2) / close)
+   530→        });
+   531→    }
+   532→    state.data = out;
+   533→    state.quote = { price: out[out.length - 1].close, changePct: 0, dayValue: out[out.length - 1].total, dayVolume: out[out.length - 1].vol, previousClose: out[out.length - 2]?.close || out[out.length - 1].close };
+   534→    state.prev = null;
+   535→    state.index = null;
+   536→    state.peers = [
+   537→        ['BBCA', 'Bank Central Asia'], ['BBRI', 'Bank Rakyat Indonesia'], ['BMRI', 'Bank Mandiri'],
+   538→        ['BBNI', 'Bank Negara Indonesia'], ['BRIS', 'Bank Syariah Indonesia'], ['ARTO', 'Bank Jago']
+   539→    ].map(([code, name]) => {
+   540→        const value = 200e9 + rng() * 300e9;
+   541→        return { code, name, value: Math.round(value), vol: Math.round(value / 5000), closeLast: 4000 + rng() * 2000, changePct: rng() * 10 - 3, dayChangePct: rng() * 3 - 1, share: 0 };
+   542→    }).sort((a, b) => b.value - a.value);
+   543→    const t = state.peers.reduce((a, p) => a + p.value, 0);
+   544→    state.peers.forEach(p => p.share = p.value / t * 100);
+   545→
+   546→    buildTicker();
+   547→    updateKPIs();
+   548→    renderChart();
+   549→    updateHero();
+   550→    renderPeers();
+   551→    renderSessions();
+   552→    seedFeed([]);
+   553→    setBadge('sim');
+   554→    toast('API tidak terjangkau — beralih ke MODE SIMULASI');
+   555→}
+   556→
+   557→/* ============ ekspor ============ */
+   558→function exportFileName(ext) {
+   559→    const d = new Date();
+   560→    const p = n => String(n).padStart(2, '0');
+   561→    const dd = p(d.getDate()), mm = p(d.getMonth() + 1), yy = String(d.getFullYear()).slice(2);
+   562→    const hh = p(d.getHours()), mi = p(d.getMinutes()), ss = p(d.getSeconds());
+   563→    return `BCA_IDX_${dd}-${mm}-${yy}_${hh}-${mi}-${ss}.${ext}`;
+   564→}
+   565→
+   566→function triggerDownload(blob, fname) {
+   567→    const a = document.createElement('a');
+   568→    a.href = URL.createObjectURL(blob);
+   569→    a.download = fname;
+   570→    document.body.appendChild(a);
+   571→    a.click();
+   572→    a.remove();
+   573→    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+   574→}
+   575→
+   576→const exportWrap = $('#exportWrap'), exportMenu = $('#exportMenu');
+   577→
+   578→function setMenu(open) {
+   579→    exportMenu.hidden = !open;
+   580→    exportWrap.classList.toggle('open', open);
+   581→    $('#exportBtn').setAttribute('aria-expanded', String(open));
+   582→}
+   583→$('#exportBtn').addEventListener('click', e => {
+   584→    e.stopPropagation();
+   585→    setMenu(exportMenu.hidden);
+   586→});
+   587→document.addEventListener('click', e => {
+   588→    if (!exportMenu.hidden && !exportWrap.contains(e.target)) setMenu(false);
+   589→});
+   590→document.addEventListener('keydown', e => {
+   591→    if (e.key === 'Escape' && !exportMenu.hidden) setMenu(false);
+   592→});
+   593→$('#optCsv').addEventListener('click', () => {
+   594→    setMenu(false);
+   595→    exportCSV();
+   596→});
+   597→$('#optXlsx').addEventListener('click', () => {
+   598→    setMenu(false);
+   599→    exportXLSX();
+   600→});
+   601→
+   602→/* ============ kontrol periode, legend, pause, jam ============ */
+   603→document.querySelectorAll('.seg button').forEach(b => {
+   604→    b.addEventListener('click', () => {
+   605→        if (state.days === +b.dataset.d) return;
+   606→        document.querySelectorAll('.seg button').forEach(x => x.classList.remove('active'));
+   607→        b.classList.add('active');
+   608→        state.days = +b.dataset.d;
+   609→        loadLive(state.days, { toast: `Periode ${state.days} hari bursa dimuat`, seedFeed: false });
+   610→    });
+   611→});
+   612→
+   613→document.querySelectorAll('.lg[data-s]').forEach(b => {
+   614→    b.addEventListener('click', () => {
+   615→        const k = b.dataset.s;
+   616→        if (state.show[k] && (!state.show.online || !state.show.store) &&
+   617→            ((k === 'online' && !state.show.store) || (k === 'store' && !state.show.online))) return;
+   618→        state.show[k] = !state.show[k];
+   619→        b.classList.toggle('active', state.show[k]);
+   620→        renderChart();
+   621→    });
+   622→});
+   623→
+   624→$('#pauseBtn').addEventListener('click', () => {
+   625→    state.paused = !state.paused;
+   626→    $('#pauseBtn').innerHTML = (state.paused ? icoPlay + '<span>Lanjut</span>' : icoPause + '<span>Jeda</span>');
+   627→    toast(state.paused ? 'Kutipan langsung dijeda' : 'Kutipan langsung dilanjutkan');
+   628→});
+   629→
+   630→function tickClock() {
+   631→    const n = new Date();
+   632→    $('#clockDate').textContent = n.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+   633→    $('#clockTime').textContent = n.toLocaleTimeString('id-ID', { hour12: false });
+   634→}
+   635→
+   636→/* ============ boot ============ */
+   637→let rz;
+   638→window.addEventListener('resize', () => {
+   639→    clearTimeout(rz);
+   640→    rz = setTimeout(renderChart, 150);
+   641→});
+   642→
+   643→tickClock();
+   644→setInterval(tickClock, 1000);
+   645→$('#pauseBtn').innerHTML = icoPause + '<span>Jeda</span>';
+   646→setBadge('loading');
+   647→buildTicker();
+   648→
+   649→/* jemput data live — link API diterapkan otomatis di loadLive() */
+   650→loadLive(state.days, { first: true, toast: '' });
+   651→setInterval(pollQuote, API.QUOTE_MS);
+   652→setInterval(() => {
+   653→    if (!document.hidden) loadLive(state.days, { seedFeed: false });
+   654→}, API.REFRESH_MS);
+   655→
